@@ -194,7 +194,7 @@ def main():
     )
     
     if uploaded_file is not None:
-        file_size_mb = uploaded_file.size / 1024 / 1024
+        file_size_mb = uploaded_file.size / (1024 * 1024)
         st.success(f"✅ Uploaded: {uploaded_file.name} ({file_size_mb:.2f} MB)")
         
         if file_size_mb > 100:
@@ -247,18 +247,17 @@ def main():
                 temp_dir = None
                 
                 try:
-                    # Save uploaded file to temporary location
+                    # Save uploaded file to temp location without loading it all into memory
                     with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_video:
-                        file_data = uploaded_file.getvalue()
-                        tmp_video.write(file_data)
                         tmp_video_path = tmp_video.name
-                    
+                        # Use shutil.copyfileobj to write the file in chunks, avoiding high RAM usage
+                        shutil.copyfileobj(uploaded_file, tmp_video)
+
                     st.info(f"📁 Temporary file created: {Path(tmp_video_path).name}")
                     
                     # Extract frames
                     extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
                     
-                    # CORRECTED if/else LOGIC
                     if extracted_files:
                         st.success(f"✅ Extracted {len(extracted_files)} frames!")
                         
@@ -321,15 +320,13 @@ def main():
                                 )
                     
                     else:
-                        # This else is now correctly paired with 'if extracted_files:'
                         st.error("❌ Failed to extract frames. The video might be empty or processing failed.")
 
                 except Exception as e:
-                    # ADDED: Catch any unexpected errors from the process
                     st.error(f"An unexpected error occurred: {e}")
                 
                 finally:
-                    # ADDED: Cleanup code that runs regardless of success or failure
+                    # Cleanup code that runs regardless of success or failure
                     if tmp_video_path and os.path.exists(tmp_video_path):
                         os.unlink(tmp_video_path)
                         st.info("🗑️ Temporary video file cleaned up")
@@ -339,5 +336,12 @@ def main():
 
 
 # Password protection and main app
-if check_password():
-    main()
+if __name__ == "__main__":
+    # To run without password locally, comment out the 'if check_password():' and just call main()
+    # To use password, ensure you have a secrets.toml file configured.
+    # For example:
+    # [passwords]
+    # app_password = "your_secret_password_here"
+
+    if check_password():
+        main()
