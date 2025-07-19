@@ -48,17 +48,17 @@ def check_password():
         # Password correct
         return True
 
-def extract_frames(video_path, interval_seconds, output_format):
+def extract_frames(video_path, interval_seconds, output_format, original_filename):
     """Extract frames from video using ffmpeg"""
     
     # Create temporary directory for extracted frames
     temp_dir = tempfile.mkdtemp()
     
-    # Get video filename without extension
-    video_name = Path(video_path).stem
+    # Use original video filename without extension instead of temp file name
+    video_name = Path(original_filename).stem
     
     # Construct ffmpeg command
-    output_pattern = os.path.join(temp_dir, f"{video_name}_%06d.{output_format}")
+    output_pattern = os.path.join(temp_dir, f"frame_%06d.{output_format}")
     
     cmd = [
         "ffmpeg",
@@ -75,7 +75,7 @@ def extract_frames(video_path, interval_seconds, output_format):
         # Get list of extracted frames
         frame_files = sorted([f for f in os.listdir(temp_dir) if f.endswith(f'.{output_format}')])
         
-        # Rename files to include timestamps
+        # Rename files to include timestamps using original video name
         renamed_files = []
         for i, frame_file in enumerate(frame_files):
             timestamp = i * interval_seconds
@@ -165,42 +165,14 @@ def main():
     st.title("🎬 ROC Photo Extraction")
     st.markdown("Extract frames from video files at specified intervals")
     
-    # Initialize session state
-    if 'extracted_files' not in st.session_state:
-        st.session_state.extracted_files = []
-    if 'temp_dir' not in st.session_state:
-        st.session_state.temp_dir = None
-    if 'current_video' not in st.session_state:
-        st.session_state.current_video = None
-    
-    # Instructions for users
-    st.info("📱 Upload a video file from your phone or computer to get started")
-    st.markdown("""
-    **How to use:**
-    1. Upload a video file (MP4, MOV, etc.)
-    2. Choose how often to extract frames (every 1-60 seconds)
-    3. Select your preferred image format (JPG or PNG)
-    4. Choose download format (individual files, ZIP, or PDF)
-    5. Click 'Extract Frames' to process your video
-    """)
-    
     # File upload
     uploaded_file = st.file_uploader(
-        "Choose a video file",
+        "Upload a video file",
         type=['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'm4v'],
         help="Supported formats: MP4, MOV, AVI, MKV, WMV, FLV, M4V"
     )
     
     if uploaded_file is not None:
-        # Check if this is a new video file
-        if st.session_state.current_video != uploaded_file.name:
-            # New video uploaded, clear previous results
-            st.session_state.extracted_files = []
-            if st.session_state.temp_dir and os.path.exists(st.session_state.temp_dir):
-                shutil.rmtree(st.session_state.temp_dir, ignore_errors=True)
-            st.session_state.temp_dir = None
-            st.session_state.current_video = uploaded_file.name
-        
         # Display video info
         st.success(f"✅ Uploaded: {uploaded_file.name} ({uploaded_file.size / 1024 / 1024:.2f} MB)")
         
@@ -251,64 +223,47 @@ def main():
                     tmp_video.write(uploaded_file.getvalue())
                     tmp_video_path = tmp_video.name
                 
-                # Extract frames
-                extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format)
+                # Extract frames - pass original filename
+                extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
                 
                 # Clean up temporary video file
                 os.unlink(tmp_video_path)
                 
                 if extracted_files:
-                    # Store results in session state
-                    st.session_state.extracted_files = extracted_files
-                    st.session_state.temp_dir = temp_dir
-                    st.rerun()  # Refresh the page to show results
-                else:
-                    st.error("❌ Failed to extract frames from video")
-        
-        # Display results if frames have been extracted
-        if st.session_state.extracted_files and st.session_state.temp_dir:
-            # Check if files still exist (in case temp directory was cleaned up)
-            existing_files = [f for f in st.session_state.extracted_files if os.path.exists(f)]
-            
-            if existing_files:
-                st.success(f"✅ Extracted {len(existing_files)} frames!")
-                
-                # Show preview of first few images
-                st.subheader("Preview")
-                
-                # Display first 3 images as preview
-                preview_cols = st.columns(min(3, len(existing_files)))
-                for i, col in enumerate(preview_cols):
-                    if i < len(existing_files):
-                        with col:
-                            try:
-                                img = Image.open(existing_files[i])
-                                st.image(img, caption=Path(existing_files[i]).name, use_column_width=True)
-                            except Exception:
-                                st.error(f"Could not load image {i+1}")
-                
-                if len(existing_files) > 3:
-                    st.info(f"... and {len(existing_files) - 3} more images")
-                
-                # Download section
-                st.subheader("Download")
-                
-                video_name = Path(uploaded_file.name).stem
-                
-                if download_format == 'Individual images':
-                    st.write("Download individual images:")
+                    st.success(f"✅ Extracted {len(extracted_files)} frames!")
                     
-                    # Create columns for download buttons
-                    cols_per_row = 3
-                    for i in range(0, len(existing_files), cols_per_row):
-                        cols = st.columns(cols_per_row)
-                        for j, col in enumerate(cols):
-                            idx = i + j
-                            if idx < len(existing_files):
-                                with col:
-                                    try:
-                                        with open(existing_files[idx], 'rb') as f:
-                                            file_name = Path(existing_files[idx]).name
+                    # Show preview of first few images
+                    st.subheader("Preview")
+                    
+                    # Display first 3 images as preview - FIXED: use_container_width instead of use_column_width
+                    preview_cols = st.columns(min(3, len(extracted_files)))
+                    for i, col in enumerate(preview_cols):
+                        if i < len(extracted_files):
+                            with col:
+                                img = Image.open(extracted_files[i])
+                                st.image(img, caption=Path(extracted_files[i]).name, use_container_width=True)
+                    
+                    if len(extracted_files) > 3:
+                        st.info(f"... and {len(extracted_files) - 3} more images")
+                    
+                    # Download section
+                    st.subheader("Download")
+                    
+                    video_name = Path(uploaded_file.name).stem
+                    
+                    if download_format == 'Individual images':
+                        st.write("Download individual images:")
+                        
+                        # Create columns for download buttons
+                        cols_per_row = 3
+                        for i in range(0, len(extracted_files), cols_per_row):
+                            cols = st.columns(cols_per_row)
+                            for j, col in enumerate(cols):
+                                idx = i + j
+                                if idx < len(extracted_files):
+                                    with col:
+                                        with open(extracted_files[idx], 'rb') as f:
+                                            file_name = Path(extracted_files[idx]).name
                                             st.download_button(
                                                 label=f"📥 {file_name}",
                                                 data=f.read(),
@@ -316,47 +271,31 @@ def main():
                                                 mime=f"image/{output_format}",
                                                 key=f"download_{idx}"
                                             )
-                                    except Exception:
-                                        st.error(f"Could not load {file_name}")
-                
-                elif download_format == 'ZIP file':
-                    try:
-                        zip_buffer = create_zip(existing_files)
+                    
+                    elif download_format == 'ZIP file':
+                        zip_buffer = create_zip(extracted_files)
                         st.download_button(
-                            label=f"📦 Download ZIP ({len(existing_files)} images)",
+                            label=f"📦 Download ZIP ({len(extracted_files)} images)",
                             data=zip_buffer,
                             file_name=f"{video_name}_frames.zip",
                             mime="application/zip"
                         )
-                    except Exception as e:
-                        st.error(f"Error creating ZIP file: {e}")
-                
-                elif download_format == 'PDF document':
-                    with st.spinner("Creating PDF..."):
-                        try:
-                            pdf_buffer = create_pdf(existing_files, video_name)
+                    
+                    elif download_format == 'PDF document':
+                        with st.spinner("Creating PDF..."):
+                            pdf_buffer = create_pdf(extracted_files, video_name)
                             st.download_button(
-                                label=f"📄 Download PDF ({len(existing_files)} images)",
+                                label=f"📄 Download PDF ({len(extracted_files)} images)",
                                 data=pdf_buffer,
                                 file_name=f"{video_name}_frames.pdf",
                                 mime="application/pdf"
                             )
-                        except Exception as e:
-                            st.error(f"Error creating PDF: {e}")
+                    
+                    # Clean up temporary directory
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 
-                # Add a button to clear results
-                if st.button("🗑️ Clear Results", type="secondary"):
-                    st.session_state.extracted_files = []
-                    if st.session_state.temp_dir and os.path.exists(st.session_state.temp_dir):
-                        shutil.rmtree(st.session_state.temp_dir, ignore_errors=True)
-                    st.session_state.temp_dir = None
-                    st.rerun()
-            
-            else:
-                # Files no longer exist, clear session state
-                st.session_state.extracted_files = []
-                st.session_state.temp_dir = None
-                st.warning("⚠️ Previous results are no longer available. Please extract frames again.")
+                else:
+                    st.error("❌ Failed to extract frames from video")
 
 # Password protection and main app
 if check_password():
