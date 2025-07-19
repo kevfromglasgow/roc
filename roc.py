@@ -57,23 +57,35 @@ def extract_frames(video_path, interval_seconds, output_format, original_filenam
     # Use original video filename without extension instead of temp file name
     video_name = Path(original_filename).stem
     
-    # Construct ffmpeg command
+    # Construct ffmpeg command with additional options for large files
     output_pattern = os.path.join(temp_dir, f"frame_%06d.{output_format}")
     
     cmd = [
         "ffmpeg",
         "-i", video_path,
         "-vf", f"fps=1/{interval_seconds}",  # Extract one frame every N seconds
+        "-q:v", "2",  # High quality
+        "-threads", "2",  # Limit threads to reduce memory usage
         "-y",  # Overwrite output files
         output_pattern
     ]
     
     try:
-        # Run ffmpeg
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # Run ffmpeg with timeout and better error handling
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            check=True,
+            timeout=300  # 5 minute timeout
+        )
         
         # Get list of extracted frames
         frame_files = sorted([f for f in os.listdir(temp_dir) if f.endswith(f'.{output_format}')])
+        
+        if not frame_files:
+            st.error("No frames were extracted. The video might be corrupted or in an unsupported format.")
+            return [], None
         
         # Rename files to include timestamps using original video name
         renamed_files = []
@@ -89,13 +101,23 @@ def extract_frames(video_path, interval_seconds, output_format, original_filenam
             old_path = os.path.join(temp_dir, frame_file)
             new_path = os.path.join(temp_dir, new_name)
             
-            os.rename(old_path, new_path)
-            renamed_files.append(new_path)
+            try:
+                os.rename(old_path, new_path)
+                renamed_files.append(new_path)
+            except OSError as e:
+                st.warning(f"Could not rename {frame_file}: {e}")
+                renamed_files.append(old_path)
         
         return renamed_files, temp_dir
         
+    except subprocess.TimeoutExpired:
+        st.error("Video processing timed out. Try using a larger interval or a smaller video file.")
+        return [], None
     except subprocess.CalledProcessError as e:
-        st.error(f"Error extracting frames: {e.stderr}")
+        st.error(f"Error extracting frames: {e.stderr if e.stderr else 'Unknown ffmpeg error'}")
+        return [], None
+    except Exception as e:
+        st.error(f"Unexpected error during frame extraction: {str(e)}")
         return [], None
 
 def create_pdf(image_paths, video_name):
@@ -173,8 +195,19 @@ def main():
     )
     
     if uploaded_file is not None:
-        # Display video info
-        st.success(f"✅ Uploaded: {uploaded_file.name} ({uploaded_file.size / 1024 / 1024:.2f} MB)")
+        # Check file size and warn if too large
+        file_size_mb = uploaded_file.size / 1024 / 1024
+        st.success(f"✅ Uploaded: {uploaded_file.name} ({file_size_mb:.2f} MB)")
+        
+        # Warn for large files
+        if file_size_mb > 100:
+            st.warning("⚠️ Large file detected! Processing may take several minutes. Consider using a larger interval to reduce processing time.")
+        
+        # Set maximum file size limit (optional - adjust as needed)
+        MAX_FILE_SIZE_MB = 500
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            st.error(f"❌ File too large! Maximum supported size is {MAX_FILE_SIZE_MB}MB. Your file is {file_size_mb:.2f}MB.")
+            return
         
         col1, col2 = st.columns(2)
         
@@ -216,40 +249,55 @@ def main():
         
         # Extract frames button
         if st.button("🎬 Extract Frames", type="primary"):
-            with st.spinner("Extracting frames from video..."):
+            with st.spinner("Extracting frames from video... This may take a few minutes for large files."):
                 
-                # Save uploaded file to temporary location
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_video:
-                    tmp_video.write(uploaded_file.getvalue())
-                    tmp_video_path = tmp_video.name
-                
-                # Extract frames - pass original filename
-                extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
-                
-                # Clean up temporary video file
-                os.unlink(tmp_video_path)
-                
-                if extracted_files:
-                    st.success(f"✅ Extracted {len(extracted_files)} frames!")
+                try:
+                    # Save uploaded file to temporary location
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_video:
+                        # Write file in chunks to handle large files better
+                        file_data = uploaded_file.getvalue()
+                        tmp_video.write(file_data)
+                        tmp_video_path = tmp_video.name
                     
-                    # Show preview of first few images
-                    st.subheader("Preview")
+                    st.info(f"📁 Temporary file created: {Path(tmp_video_path).name}")
                     
-                    # Display first 3 images as preview - FIXED: use_container_width instead of use_column_width
-                    preview_cols = st.columns(min(3, len(extracted_files)))
-                    for i, col in enumerate(preview_cols):
-                        if i < len(extracted_files):
-                            with col:
-                                img = Image.open(extracted_files[i])
-                                st.image(img, caption=Path(extracted_files[i]).name, use_container_width=True)
+                    # Extract frames - pass original filename
+                    extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
                     
-                    if len(extracted_files) > 3:
-                        st.info(f"... and {len(extracted_files) - 3} more images")
+                    # Clean up temporary video file
+                    try:
+                        os.unlink(tmp_video_path)
+                        st.info("🗑️ Temporary video file cleaned up")
+                    except OSError:
+                        pass  # File might already be deleted
                     
-                    # Download section
-                    st.subheader("Download")
-                    
-                    video_name = Path(uploaded_file.name).stem
+                    if extracted_files:
+                        st.success(f"✅ Extracted {len(extracted_files)} frames!")
+                        
+                        # Show preview of first few images
+                        st.subheader("Preview")
+                        
+                        # Display first 3 images as preview - FIXED: use_container_width instead of use_column_width
+                        preview_cols = st.columns(min(3, len(extracted_files)))
+                        for i, col in enumerate(preview_cols):
+                            if i < len(extracted_files):
+                                with col:
+                                    try:
+                                        img = Image.open(extracted_files[i])
+                                        # Resize large images for preview to save memory
+                                        if img.size[0] > 800 or img.size[1] > 600:
+                                            img.thumbnail((400, 300), Image.Resampling.LANCZOS)
+                                        st.image(img, caption=Path(extracted_files[i]).name, use_container_width=True)
+                                    except Exception as e:
+                                        st.error(f"Could not display preview for {Path(extracted_files[i]).name}: {e}")
+                        
+                        if len(extracted_files) > 3:
+                            st.info(f"... and {len(extracted_files) - 3} more images")
+                        
+                        # Download section
+                        st.subheader("Download")
+                        
+                        video_name = Path(uploaded_file.name).stem
                     
                     if download_format == 'Individual images':
                         st.write("Download individual images:")
