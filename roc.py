@@ -132,7 +132,7 @@ def get_page_size(paper_size, orientation):
     else:  # Landscape
         return (base_size[1], base_size[0])  # Swap width and height
 
-def create_pdf(image_paths, video_name, paper_size="A4", orientation="Portrait"):
+def create_pdf(image_paths, tower_number, video_filename, paper_size="A4", orientation="Portrait"):
     """Create PDF with all images, one per page, centered and filling 80% of page"""
     
     pdf_buffer = io.BytesIO()
@@ -151,16 +151,26 @@ def create_pdf(image_paths, video_name, paper_size="A4", orientation="Portrait")
     max_height = page_height * 0.8  # 80% of page height
     
     for i, img_path in enumerate(image_paths):
-        # Get image name for title (optional, comment out if you don't want titles)
+        # Extract timestamp from filename
         img_name = Path(img_path).name
+        # Extract timestamp (assumes format: videoname_XXhYYmZZs.ext)
+        timestamp = "Unknown"
+        if '_' in img_name:
+            timestamp_part = img_name.split('_')[-1].split('.')[0]  # Get part before extension
+            if 'h' in timestamp_part and 'm' in timestamp_part and 's' in timestamp_part:
+                timestamp = timestamp_part
         
         # Add some top spacing to center content vertically
-        story.append(Spacer(1, margin_height * 0.3))
+        story.append(Spacer(1, margin_height * 0.2))
         
-        # Add image name as title (optional)
-        title = Paragraph(img_name, styles['Normal'])  # Using Normal style to make it smaller
+        # Create three-line title
+        title_text = f"""ROC Photos For {tower_number}<br/>
+Video File: {video_filename}<br/>
+Timestamp: {timestamp}"""
+        
+        title = Paragraph(title_text, styles['Normal'])
         story.append(title)
-        story.append(Spacer(1, 0.1*inch))
+        story.append(Spacer(1, 0.2*inch))
         
         # Load image and calculate optimal size
         img = Image.open(img_path)
@@ -168,13 +178,16 @@ def create_pdf(image_paths, video_name, paper_size="A4", orientation="Portrait")
         aspect_ratio = img_width / img_height
         
         # Calculate the size to fill 80% of page while maintaining aspect ratio
-        if aspect_ratio > (max_width / max_height):
-            # Image is wider relative to page - fit to width
+        # Account for title space (approximately 1 inch)
+        available_height = max_height - 1*inch
+        
+        if aspect_ratio > (max_width / available_height):
+            # Image is wider relative to available space - fit to width
             final_width = max_width
             final_height = final_width / aspect_ratio
         else:
-            # Image is taller relative to page - fit to height
-            final_height = max_height - 0.5*inch  # Leave space for title
+            # Image is taller relative to available space - fit to height
+            final_height = available_height
             final_width = final_height * aspect_ratio
         
         # Create ReportLab image - it will be centered automatically by SimpleDocTemplate
@@ -183,9 +196,9 @@ def create_pdf(image_paths, video_name, paper_size="A4", orientation="Portrait")
         
         # Add remaining space to center content vertically
         if i < len(image_paths) - 1:  # Not the last image
-            remaining_space = max_height - final_height - 0.5*inch  # Account for title space
+            remaining_space = available_height - final_height
             if remaining_space > 0:
-                story.append(Spacer(1, remaining_space * 0.5))
+                story.append(Spacer(1, remaining_space * 0.4))
             
             # Force page break
             from reportlab.platypus import PageBreak
@@ -194,8 +207,8 @@ def create_pdf(image_paths, video_name, paper_size="A4", orientation="Portrait")
     # Build PDF with custom margins to center content
     doc.leftMargin = margin_width
     doc.rightMargin = margin_width
-    doc.topMargin = margin_height * 0.7
-    doc.bottomMargin = margin_height * 0.7
+    doc.topMargin = margin_height * 0.6
+    doc.bottomMargin = margin_height * 0.6
     
     doc.build(story)
     pdf_buffer.seek(0)
@@ -271,6 +284,14 @@ def main():
                 st.info("💡 All images will be packaged in a single ZIP file")
             elif download_format == 'PDF document':
                 st.info("💡 All images will be combined into a PDF (one image per page)")
+        
+        # Tower number input (only show when PDF is selected)
+        if download_format == 'PDF document':
+            tower_number = st.text_input(
+                "Tower Number(s):",
+                placeholder="e.g., CB4-8B",
+                help="This will be used in the PDF filename and image titles"
+            )
         
         # PDF-specific options
         if download_format == 'PDF document':
@@ -363,14 +384,18 @@ def main():
                             )
                         
                         elif download_format == 'PDF document':
-                            with st.spinner("Creating PDF..."):
-                                pdf_buffer = create_pdf(extracted_files, video_name, paper_size, orientation)
-                                st.download_button(
-                                    label=f"📄 Download PDF ({len(extracted_files)} images) - {paper_size} {orientation}",
-                                    data=pdf_buffer,
-                                    file_name=f"{video_name}_frames_{paper_size}_{orientation}.pdf",
-                                    mime="application/pdf"
-                                )
+                            if not tower_number or tower_number.strip() == "":
+                                st.error("❌ Please enter a Tower Number for PDF generation.")
+                            else:
+                                with st.spinner("Creating PDF..."):
+                                    pdf_buffer = create_pdf(extracted_files, tower_number.strip(), uploaded_file.name, paper_size, orientation)
+                                    pdf_filename = f"ROC photos for {tower_number.strip()}.pdf"
+                                    st.download_button(
+                                        label=f"📄 Download PDF ({len(extracted_files)} images) - {paper_size} {orientation}",
+                                        data=pdf_buffer,
+                                        file_name=pdf_filename,
+                                        mime="application/pdf"
+                                    )
                     
                     else:
                         st.error("❌ Failed to extract frames. The video might be empty or processing failed.")
