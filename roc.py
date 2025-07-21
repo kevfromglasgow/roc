@@ -5,7 +5,7 @@ import subprocess
 import zipfile
 from pathlib import Path
 from PIL import Image
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import letter, A4, A3
 from reportlab.platypus import SimpleDocTemplate, Spacer, Image as RLImage, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -120,50 +120,82 @@ def extract_frames(video_path, interval_seconds, output_format, original_filenam
         st.error(f"Unexpected error during frame extraction: {str(e)}")
         return [], None
 
-def create_pdf(image_paths, video_name):
-    """Create PDF with all images, one per page"""
+def get_page_size(paper_size, orientation):
+    """Get page dimensions based on paper size and orientation"""
+    if paper_size == "A4":
+        base_size = A4
+    else:  # A3
+        base_size = A3
+    
+    if orientation == "Portrait":
+        return base_size  # (width, height)
+    else:  # Landscape
+        return (base_size[1], base_size[0])  # Swap width and height
+
+def create_pdf(image_paths, video_name, paper_size="A4", orientation="Portrait"):
+    """Create PDF with all images, one per page, centered and filling 80% of page"""
     
     pdf_buffer = io.BytesIO()
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4)
+    page_size = get_page_size(paper_size, orientation)
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=page_size)
     
     story = []
     styles = getSampleStyleSheet()
     
-    for img_path in image_paths:
-        # Get image name for title
+    # Calculate available space (80% of page)
+    page_width, page_height = page_size
+    margin_width = page_width * 0.1  # 10% margin on each side
+    margin_height = page_height * 0.1  # 10% margin on top and bottom
+    
+    max_width = page_width * 0.8  # 80% of page width
+    max_height = page_height * 0.8  # 80% of page height
+    
+    for i, img_path in enumerate(image_paths):
+        # Get image name for title (optional, comment out if you don't want titles)
         img_name = Path(img_path).name
         
-        # Add image name as title
-        title = Paragraph(img_name, styles['Title'])
+        # Add some top spacing to center content vertically
+        story.append(Spacer(1, margin_height * 0.3))
+        
+        # Add image name as title (optional)
+        title = Paragraph(img_name, styles['Normal'])  # Using Normal style to make it smaller
         story.append(title)
-        story.append(Spacer(1, 0.2*inch))
+        story.append(Spacer(1, 0.1*inch))
         
-        # Add image
+        # Load image and calculate optimal size
         img = Image.open(img_path)
-        
-        # Calculate size to fit on page while maintaining aspect ratio
-        page_width, page_height = A4
-        max_width = page_width - 2*inch
-        max_height = page_height - 3*inch  # Leave space for title
-        
         img_width, img_height = img.size
         aspect_ratio = img_width / img_height
         
-        if img_width > max_width:
-            img_width = max_width
-            img_height = img_width / aspect_ratio
+        # Calculate the size to fill 80% of page while maintaining aspect ratio
+        if aspect_ratio > (max_width / max_height):
+            # Image is wider relative to page - fit to width
+            final_width = max_width
+            final_height = final_width / aspect_ratio
+        else:
+            # Image is taller relative to page - fit to height
+            final_height = max_height - 0.5*inch  # Leave space for title
+            final_width = final_height * aspect_ratio
         
-        if img_height > max_height:
-            img_height = max_height
-            img_width = img_height * aspect_ratio
-        
-        # Create ReportLab image
-        rl_img = RLImage(img_path, width=img_width, height=img_height)
+        # Create ReportLab image - it will be centered automatically by SimpleDocTemplate
+        rl_img = RLImage(img_path, width=final_width, height=final_height)
         story.append(rl_img)
         
-        # Add page break except for last image
-        if img_path != image_paths[-1]:
-            story.append(Spacer(1, 0.5*inch))
+        # Add remaining space to center content vertically
+        if i < len(image_paths) - 1:  # Not the last image
+            remaining_space = max_height - final_height - 0.5*inch  # Account for title space
+            if remaining_space > 0:
+                story.append(Spacer(1, remaining_space * 0.5))
+            
+            # Force page break
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+    
+    # Build PDF with custom margins to center content
+    doc.leftMargin = margin_width
+    doc.rightMargin = margin_width
+    doc.topMargin = margin_height * 0.7
+    doc.bottomMargin = margin_height * 0.7
     
     doc.build(story)
     pdf_buffer.seek(0)
@@ -240,6 +272,27 @@ def main():
             elif download_format == 'PDF document':
                 st.info("💡 All images will be combined into a PDF (one image per page)")
         
+        # PDF-specific options
+        if download_format == 'PDF document':
+            st.subheader("PDF Options")
+            pdf_col1, pdf_col2 = st.columns(2)
+            
+            with pdf_col1:
+                paper_size = st.selectbox(
+                    "Paper size:",
+                    options=['A4', 'A3'],
+                    index=0
+                )
+            
+            with pdf_col2:
+                orientation = st.selectbox(
+                    "Orientation:",
+                    options=['Portrait', 'Landscape'],
+                    index=0
+                )
+            
+            st.info(f"📄 PDF will be created in {paper_size} {orientation.lower()} format with images centered and filling 80% of the page")
+        
         if st.button("🎬 Extract Frames", type="primary"):
             with st.spinner("Extracting frames from video... This may take a few minutes for large files."):
                 
@@ -311,11 +364,11 @@ def main():
                         
                         elif download_format == 'PDF document':
                             with st.spinner("Creating PDF..."):
-                                pdf_buffer = create_pdf(extracted_files, video_name)
+                                pdf_buffer = create_pdf(extracted_files, video_name, paper_size, orientation)
                                 st.download_button(
-                                    label=f"📄 Download PDF ({len(extracted_files)} images)",
+                                    label=f"📄 Download PDF ({len(extracted_files)} images) - {paper_size} {orientation}",
                                     data=pdf_buffer,
-                                    file_name=f"{video_name}_frames.pdf",
+                                    file_name=f"{video_name}_frames_{paper_size}_{orientation}.pdf",
                                     mime="application/pdf"
                                 )
                     
