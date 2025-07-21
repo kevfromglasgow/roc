@@ -12,6 +12,10 @@ from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 import io
 import shutil
+import cv2
+import numpy as np
+import easyocr
+import re
 
 # Set page config
 st.set_page_config(
@@ -120,6 +124,148 @@ def extract_frames(video_path, interval_seconds, output_format, original_filenam
         st.error(f"Unexpected error during frame extraction: {str(e)}")
         return [], None
 
+def detect_and_blur_faces_and_plates(image_path, blur_faces=True, blur_plates=True):
+    """
+    Detect and blur faces and license plates using lightweight methods
+    """
+    image = cv2.imread(image_path)
+    if image is None:
+        return image_path
+    
+    blurred_image = image.copy()
+    height, width = image.shape[:2]
+    
+    # Face detection using OpenCV's Haar Cascades
+    if blur_faces:
+        try:
+            # Load face detection classifier
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            
+            # Convert to grayscale for face detection
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Detect faces
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(30, 30)
+            )
+            
+            # Blur each detected face
+            for (x, y, w, h) in faces:
+                # Add some padding around the face
+                padding = 20
+                x1 = max(0, x - padding)
+                y1 = max(0, y - padding)
+                x2 = min(width, x + w + padding)
+                y2 = min(height, y + h + padding)
+                
+                # Blur the face region
+                roi = blurred_image[y1:y2, x1:x2]
+                if roi.size > 0:  # Make sure ROI is not empty
+                    roi = cv2.GaussianBlur(roi, (51, 51), 0)
+                    blurred_image[y1:y2, x1:x2] = roi
+                    
+        except Exception as e:
+            st.warning(f"Face detection failed: {e}")
+    
+    # License plate detection using EasyOCR
+    if blur_plates:
+        try:
+            # Initialize EasyOCR reader
+            reader = easyocr.Reader(['en'], gpu=False)  # Set gpu=True if you have CUDA
+            results = reader.readtext(image)
+            
+            for (bbox, text, confidence) in results:
+                # Clean the detected text
+                clean_text = re.sub(r'[^A-Z0-9]', '', text.upper())
+                
+                # Heuristics to identify potential license plates
+                is_potential_plate = (
+                    len(clean_text) >= 4 and len(clean_text) <= 10 and  # Reasonable length
+                    confidence > 0.4 and  # Reasonable confidence
+                    bool(re.search(r'\d', clean_text)) and  # Contains numbers
+                    bool(re.search(r'[A-Z]', clean_text)) and  # Contains letters
+                    len(re.findall(r'\d', clean_text)) >= 1 and  # At least 1 digit
+                    len(re.findall(r'[A-Z]', clean_text)) >= 1  # At least 1 letter
+                )
+                
+                # Additional pattern matching for common formats
+                plate_patterns = [
+                    r'^[A-Z]{1,3}[0-9]{1,4}[A-Z]{0,3}$',  # General format
+                    r'^[0-9]{1,4}[A-Z]{1,4}[0-9]{0,4}$',  # Mixed format
+                    r'^[A-Z]{2}[0-9]{2}[A-Z]{3}$',        # UK format AA00AAA
+                    r'^[A-Z]{1}[0-9]{1,3}[A-Z]{3}$',      # UK format A000AAA
+                ]
+                
+                pattern_match = any(re.match(pattern, clean_text) for pattern in plate_patterns)
+                
+                if is_potential_plate or pattern_match:
+                    # Get bounding box coordinates
+                    (top_left, top_right, bottom_right, bottom_left) = bbox
+                    
+                    # Calculate bounding rectangle
+                    x_coords = [point[0] for point in bbox]
+                    y_coords = [point[1] for point in bbox]
+                    
+                    x1 = int(min(x_coords)) - 15  # Add padding
+                    y1 = int(min(y_coords)) - 15
+                    x2 = int(max(x_coords)) + 15
+                    y2 = int(max(y_coords)) + 15
+                    
+                    # Ensure coordinates are within image bounds
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(width, x2)
+                    y2 = min(height, y2)
+                    
+                    # Blur the license plate area
+                    if x2 > x1 and y2 > y1:  # Make sure we have a valid region
+                        roi = blurred_image[y1:y2, x1:x2]
+                        if roi.size > 0:
+                            roi = cv2.GaussianBlur(roi, (41, 41), 0)
+                            blurred_image[y1:y2, x1:x2] = roi
+                    
+        except Exception as e:
+            st.warning(f"License plate detection failed: {e}")
+    
+    # Save blurred image
+    blurred_path = image_path.replace('.', '_blurred.')
+    cv2.imwrite(blurred_path, blurred_image)
+    
+    return blurred_path
+
+def process_extracted_frames(frame_paths, blur_faces=True, blur_plates=True):
+    """
+    Process all extracted frames to blur faces and license plates
+    """
+    processed_paths = []
+    
+    # Create progress indicators
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, frame_path in enumerate(frame_paths):
+        status_text.text(f"🔒 Processing frame {i+1}/{len(frame_paths)} for privacy...")
+        
+        try:
+            blurred_path = detect_and_blur_faces_and_plates(
+                frame_path, 
+                blur_faces=blur_faces, 
+                blur_plates=blur_plates
+            )
+            processed_paths.append(blurred_path)
+        except Exception as e:
+            st.warning(f"Failed to process {Path(frame_path).name}: {e}")
+            processed_paths.append(frame_path)  # Keep original if processing fails
+        
+        # Update progress
+        progress_bar.progress((i + 1) / len(frame_paths))
+    
+    status_text.text("✅ Privacy processing complete!")
+    return processed_paths
+
 def create_pdf(image_paths, video_name):
     """Create PDF with all images, one per page"""
     
@@ -184,8 +330,8 @@ def create_zip(file_paths):
     return zip_buffer
 
 def main():
-    st.title("🎬 ROC Photo Extraction")
-    st.markdown("Extract frames from video files at specified intervals")
+    st.title("🎬 ROC Photo Extraction with Privacy Protection")
+    st.markdown("Extract frames from video files at specified intervals with automatic face and license plate blurring")
     
     uploaded_file = st.file_uploader(
         "Upload a video file",
@@ -222,7 +368,30 @@ def main():
                 index=0
             )
         
-        st.subheader("Download Options")
+        # Privacy Options Section
+        st.subheader("🔒 Privacy Protection")
+        st.markdown("Automatically detect and blur sensitive content in extracted frames")
+        
+        col_privacy1, col_privacy2 = st.columns(2)
+        
+        with col_privacy1:
+            blur_faces = st.checkbox(
+                "👤 Blur faces",
+                value=True,
+                help="Automatically detect and blur human faces in extracted frames"
+            )
+        
+        with col_privacy2:
+            blur_plates = st.checkbox(
+                "🚗 Blur license plates", 
+                value=True,
+                help="Automatically detect and blur license plates in extracted frames"
+            )
+        
+        if blur_faces or blur_plates:
+            st.info("💡 Privacy processing will add extra time to frame extraction but helps protect sensitive information")
+        
+        st.subheader("📥 Download Options")
         col3, col4 = st.columns(2)
         
         with col3:
@@ -261,8 +430,20 @@ def main():
                     if extracted_files:
                         st.success(f"✅ Extracted {len(extracted_files)} frames!")
                         
+                        # Apply privacy filters if requested
+                        if blur_faces or blur_plates:
+                            with st.spinner("🔒 Applying privacy protection..."):
+                                extracted_files = process_extracted_frames(
+                                    extracted_files, 
+                                    blur_faces=blur_faces, 
+                                    blur_plates=blur_plates
+                                )
+                        
                         # --- Preview Section ---
-                        st.subheader("Preview")
+                        st.subheader("👁️ Preview")
+                        if blur_faces or blur_plates:
+                            st.caption("Preview shows processed images with privacy protection applied")
+                        
                         preview_cols = st.columns(min(3, len(extracted_files)))
                         for i, col in enumerate(preview_cols):
                             if i < len(extracted_files):
@@ -279,7 +460,7 @@ def main():
                             st.info(f"... and {len(extracted_files) - 3} more images")
                         
                         # --- Download Section ---
-                        st.subheader("Download")
+                        st.subheader("📥 Download")
                         video_name = Path(uploaded_file.name).stem
 
                         if download_format == 'Individual images':
@@ -302,20 +483,22 @@ def main():
                         
                         elif download_format == 'ZIP file':
                             zip_buffer = create_zip(extracted_files)
+                            suffix = "_privacy_protected" if (blur_faces or blur_plates) else ""
                             st.download_button(
                                 label=f"📦 Download ZIP ({len(extracted_files)} images)",
                                 data=zip_buffer,
-                                file_name=f"{video_name}_frames.zip",
+                                file_name=f"{video_name}_frames{suffix}.zip",
                                 mime="application/zip"
                             )
                         
                         elif download_format == 'PDF document':
                             with st.spinner("Creating PDF..."):
                                 pdf_buffer = create_pdf(extracted_files, video_name)
+                                suffix = "_privacy_protected" if (blur_faces or blur_plates) else ""
                                 st.download_button(
                                     label=f"📄 Download PDF ({len(extracted_files)} images)",
                                     data=pdf_buffer,
-                                    file_name=f"{video_name}_frames.pdf",
+                                    file_name=f"{video_name}_frames{suffix}.pdf",
                                     mime="application/pdf"
                                 )
                     
@@ -333,7 +516,6 @@ def main():
                     if temp_dir and os.path.exists(temp_dir):
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         st.info("🗑️ Temporary image directory cleaned up")
-
 
 # Password protection and main app
 if __name__ == "__main__":
