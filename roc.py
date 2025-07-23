@@ -48,6 +48,56 @@ def check_password():
         # Password correct
         return True
 
+def remove_audio_from_video(input_path, original_filename):
+    """Remove audio from video using ffmpeg"""
+    
+    # Create output filename with "_no_audio" suffix
+    video_stem = Path(original_filename).stem
+    video_ext = Path(original_filename).suffix
+    output_filename = f"{video_stem}_no_audio{video_ext}"
+    
+    # Create temporary file for output
+    temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=video_ext)
+    temp_output.close()
+    
+    # Construct ffmpeg command to remove audio
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-c:v", "copy",  # Copy video stream without re-encoding
+        "-an",  # Remove audio stream
+        "-y",  # Overwrite output files
+        temp_output.name
+    ]
+    
+    try:
+        # Run ffmpeg with timeout
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            check=True,
+            timeout=300  # 5 minute timeout
+        )
+        
+        return temp_output.name, output_filename
+        
+    except subprocess.TimeoutExpired:
+        st.error("Audio removal timed out. The video file might be too large.")
+        if os.path.exists(temp_output.name):
+            os.unlink(temp_output.name)
+        return None, None
+    except subprocess.CalledProcessError as e:
+        st.error(f"Error removing audio: {e.stderr if e.stderr else 'Unknown ffmpeg error'}")
+        if os.path.exists(temp_output.name):
+            os.unlink(temp_output.name)
+        return None, None
+    except Exception as e:
+        st.error(f"Unexpected error during audio removal: {str(e)}")
+        if os.path.exists(temp_output.name):
+            os.unlink(temp_output.name)
+        return None, None
+
 def extract_frames(video_path, interval_seconds, output_format, original_filename):
     """Extract frames from video using ffmpeg"""
     
@@ -250,6 +300,17 @@ def main():
             st.error(f"❌ File too large! Maximum supported size is {MAX_FILE_SIZE_MB}MB. Your file is {file_size_mb:.2f}MB.")
             return
         
+        # Audio removal option
+        st.subheader("🔇 Audio Options")
+        remove_audio_option = st.checkbox(
+            "Remove audio from video",
+            help="Create a silent version of the video alongside frame extraction"
+        )
+        
+        if remove_audio_option:
+            st.info("📹 A video file without audio will be available for download after processing")
+        
+        st.subheader("🖼️ Frame Extraction Settings")
         col1, col2 = st.columns(2)
         
         with col1:
@@ -267,7 +328,7 @@ def main():
                 index=0
             )
         
-        st.subheader("Download Options")
+        st.subheader("📦 Download Options")
         col3, col4 = st.columns(2)
         
         with col3:
@@ -295,7 +356,7 @@ def main():
         
         # PDF-specific options
         if download_format == 'PDF document':
-            st.subheader("PDF Options")
+            st.subheader("📄 PDF Options")
             pdf_col1, pdf_col2 = st.columns(2)
             
             with pdf_col1:
@@ -314,11 +375,12 @@ def main():
             
             st.info(f"📄 PDF will be created in {paper_size} {orientation.lower()} format with images centered and filling 80% of the page")
         
-        if st.button("🎬 Extract Frames", type="primary"):
-            with st.spinner("Extracting frames from video... This may take a few minutes for large files."):
+        if st.button("🎬 Process Video", type="primary"):
+            with st.spinner("Processing video... This may take a few minutes for large files."):
                 
                 tmp_video_path = None
                 temp_dir = None
+                silent_video_path = None
                 
                 try:
                     # Save uploaded file to temp location without loading it all into memory
@@ -329,14 +391,24 @@ def main():
 
                     st.info(f"📁 Temporary file created: {Path(tmp_video_path).name}")
                     
+                    # Remove audio if requested
+                    if remove_audio_option:
+                        with st.spinner("Removing audio from video..."):
+                            silent_video_path, silent_video_filename = remove_audio_from_video(tmp_video_path, uploaded_file.name)
+                            if silent_video_path:
+                                st.success("✅ Audio removed successfully!")
+                            else:
+                                st.error("❌ Failed to remove audio from video")
+                    
                     # Extract frames
-                    extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
+                    with st.spinner("Extracting frames..."):
+                        extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
                     
                     if extracted_files:
                         st.success(f"✅ Extracted {len(extracted_files)} frames!")
                         
                         # --- Preview Section ---
-                        st.subheader("Preview")
+                        st.subheader("🖼️ Preview")
                         preview_cols = st.columns(min(3, len(extracted_files)))
                         for i, col in enumerate(preview_cols):
                             if i < len(extracted_files):
@@ -353,7 +425,26 @@ def main():
                             st.info(f"... and {len(extracted_files) - 3} more images")
                         
                         # --- Download Section ---
-                        st.subheader("Download")
+                        st.subheader("📥 Downloads")
+                        
+                        # Video download section (if audio removal was requested)
+                        if remove_audio_option and silent_video_path and os.path.exists(silent_video_path):
+                            st.markdown("#### 📹 Video (No Audio)")
+                            try:
+                                with open(silent_video_path, 'rb') as video_file:
+                                    video_data = video_file.read()
+                                    st.download_button(
+                                        label=f"📹 Download {silent_video_filename}",
+                                        data=video_data,
+                                        file_name=silent_video_filename,
+                                        mime="video/mp4",
+                                        help="Video with audio removed"
+                                    )
+                            except Exception as e:
+                                st.error(f"Error preparing video download: {e}")
+                        
+                        # Images download section
+                        st.markdown("#### 🖼️ Extracted Images")
                         video_name = Path(uploaded_file.name).stem
 
                         if download_format == 'Individual images':
@@ -411,6 +502,9 @@ def main():
                     if temp_dir and os.path.exists(temp_dir):
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         st.info("🗑️ Temporary image directory cleaned up")
+                    if silent_video_path and os.path.exists(silent_video_path):
+                        os.unlink(silent_video_path)
+                        st.info("🗑️ Silent video file cleaned up")
 
 
 # Password protection and main app
