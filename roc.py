@@ -282,6 +282,14 @@ def main():
     st.title("🎬 ROC Photo Extraction")
     st.markdown("Extract frames from video files at specified intervals")
     
+    # Initialize session state for persistent data
+    if 'processed_data' not in st.session_state:
+        st.session_state.processed_data = None
+    if 'silent_video_data' not in st.session_state:
+        st.session_state.silent_video_data = None
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
+    
     uploaded_file = st.file_uploader(
         "Upload a video file",
         type=['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'm4v'],
@@ -375,136 +383,194 @@ def main():
             
             st.info(f"📄 PDF will be created in {paper_size} {orientation.lower()} format with images centered and filling 80% of the page")
         
-        if st.button("🎬 Process Video", type="primary"):
-            with st.spinner("Processing video... This may take a few minutes for large files."):
-                
-                tmp_video_path = None
-                temp_dir = None
-                silent_video_path = None
-                
-                try:
-                    # Save uploaded file to temp location without loading it all into memory
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_video:
-                        tmp_video_path = tmp_video.name
-                        # Use shutil.copyfileobj to write the file in chunks, avoiding high RAM usage
-                        shutil.copyfileobj(uploaded_file, tmp_video)
+        # Reset processing when a new file is uploaded
+        if uploaded_file and st.session_state.get('last_uploaded_file') != uploaded_file.name:
+            st.session_state.processed_data = None
+            st.session_state.silent_video_data = None
+            st.session_state.processing_complete = False
+            st.session_state.last_uploaded_file = uploaded_file.name
 
-                    st.info(f"📁 Temporary file created: {Path(tmp_video_path).name}")
+        if st.button("🎬 Process Video", type="primary") or st.session_state.processing_complete:
+            if not st.session_state.processing_complete:
+                # Only process if we haven't already processed
+                with st.spinner("Processing video... This may take a few minutes for large files."):
                     
-                    # Remove audio if requested
-                    if remove_audio_option:
-                        with st.spinner("Removing audio from video..."):
-                            silent_video_path, silent_video_filename = remove_audio_from_video(tmp_video_path, uploaded_file.name)
-                            if silent_video_path:
-                                st.success("✅ Audio removed successfully!")
-                            else:
-                                st.error("❌ Failed to remove audio from video")
+                    tmp_video_path = None
+                    temp_dir = None
+                    silent_video_path = None
                     
-                    # Extract frames
-                    with st.spinner("Extracting frames..."):
-                        extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
+                    try:
+                        # Save uploaded file to temp location without loading it all into memory
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_video:
+                            tmp_video_path = tmp_video.name
+                            # Use shutil.copyfileobj to write the file in chunks, avoiding high RAM usage
+                            shutil.copyfileobj(uploaded_file, tmp_video)
+
+                        st.info(f"📁 Temporary file created: {Path(tmp_video_path).name}")
+                        
+                        # Remove audio if requested
+                        silent_video_data = None
+                        silent_video_filename = None
+                        if remove_audio_option:
+                            with st.spinner("Removing audio from video..."):
+                                silent_video_path, silent_video_filename = remove_audio_from_video(tmp_video_path, uploaded_file.name)
+                                if silent_video_path:
+                                    st.success("✅ Audio removed successfully!")
+                                    # Store video data in session state
+                                    with open(silent_video_path, 'rb') as f:
+                                        silent_video_data = f.read()
+                                else:
+                                    st.error("❌ Failed to remove audio from video")
+                        
+                        # Extract frames
+                        with st.spinner("Extracting frames..."):
+                            extracted_files, temp_dir = extract_frames(tmp_video_path, interval, output_format, uploaded_file.name)
+                        
+                        if extracted_files:
+                            st.success(f"✅ Extracted {len(extracted_files)} frames!")
+                            
+                            # Store all processed data in session state
+                            processed_data = {
+                                'extracted_files': [],
+                                'video_name': Path(uploaded_file.name).stem,
+                                'original_filename': uploaded_file.name,
+                                'output_format': output_format,
+                                'download_format': download_format,
+                                'remove_audio_option': remove_audio_option
+                            }
+                            
+                            # Copy extracted files data to session state
+                            for file_path in extracted_files:
+                                with open(file_path, 'rb') as f:
+                                    file_data = f.read()
+                                    processed_data['extracted_files'].append({
+                                        'name': Path(file_path).name,
+                                        'data': file_data
+                                    })
+                            
+                            # Store in session state
+                            st.session_state.processed_data = processed_data
+                            if silent_video_data:
+                                st.session_state.silent_video_data = {
+                                    'data': silent_video_data,
+                                    'filename': silent_video_filename
+                                }
+                            st.session_state.processing_complete = True
+                            
+                        else:
+                            st.error("❌ Failed to extract frames. The video might be empty or processing failed.")
+
+                    except Exception as e:
+                        st.error(f"An unexpected error occurred: {e}")
                     
-                    if extracted_files:
-                        st.success(f"✅ Extracted {len(extracted_files)} frames!")
-                        
-                        # --- Preview Section ---
-                        st.subheader("🖼️ Preview")
-                        preview_cols = st.columns(min(3, len(extracted_files)))
-                        for i, col in enumerate(preview_cols):
-                            if i < len(extracted_files):
-                                with col:
-                                    try:
-                                        img = Image.open(extracted_files[i])
-                                        if img.size[0] > 800 or img.size[1] > 600:
-                                            img.thumbnail((400, 300), Image.Resampling.LANCZOS)
-                                        st.image(img, caption=Path(extracted_files[i]).name, use_container_width=True)
-                                    except Exception as e:
-                                        st.error(f"Could not display preview: {e}")
-                        
-                        if len(extracted_files) > 3:
-                            st.info(f"... and {len(extracted_files) - 3} more images")
-                        
-                        # --- Download Section ---
-                        st.subheader("📥 Downloads")
-                        
-                        # Video download section (if audio removal was requested)
-                        if remove_audio_option and silent_video_path and os.path.exists(silent_video_path):
-                            st.markdown("#### 📹 Video (No Audio)")
+                    finally:
+                        # Cleanup code that runs regardless of success or failure
+                        if tmp_video_path and os.path.exists(tmp_video_path):
+                            os.unlink(tmp_video_path)
+                            st.info("🗑️ Temporary video file cleaned up")
+                        if temp_dir and os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            st.info("🗑️ Temporary image directory cleaned up")
+                        if silent_video_path and os.path.exists(silent_video_path):
+                            os.unlink(silent_video_path)
+                            st.info("🗑️ Silent video file cleaned up")
+
+            # Display results from session state
+            if st.session_state.processed_data:
+                processed_data = st.session_state.processed_data
+                
+                # --- Preview Section ---
+                st.subheader("🖼️ Preview")
+                preview_cols = st.columns(min(3, len(processed_data['extracted_files'])))
+                for i, col in enumerate(preview_cols):
+                    if i < len(processed_data['extracted_files']):
+                        with col:
                             try:
-                                with open(silent_video_path, 'rb') as video_file:
-                                    video_data = video_file.read()
-                                    st.download_button(
-                                        label=f"📹 Download {silent_video_filename}",
-                                        data=video_data,
-                                        file_name=silent_video_filename,
-                                        mime="video/mp4",
-                                        help="Video with audio removed"
-                                    )
+                                img_data = processed_data['extracted_files'][i]['data']
+                                img = Image.open(io.BytesIO(img_data))
+                                if img.size[0] > 800 or img.size[1] > 600:
+                                    img.thumbnail((400, 300), Image.Resampling.LANCZOS)
+                                st.image(img, caption=processed_data['extracted_files'][i]['name'], use_container_width=True)
                             except Exception as e:
-                                st.error(f"Error preparing video download: {e}")
-                        
-                        # Images download section
-                        st.markdown("#### 🖼️ Extracted Images")
-                        video_name = Path(uploaded_file.name).stem
-
-                        if download_format == 'Individual images':
-                            cols_per_row = 3
-                            for i in range(0, len(extracted_files), cols_per_row):
-                                cols = st.columns(cols_per_row)
-                                for j, col in enumerate(cols):
-                                    idx = i + j
-                                    if idx < len(extracted_files):
-                                        with col:
-                                            with open(extracted_files[idx], 'rb') as f:
-                                                file_name = Path(extracted_files[idx]).name
-                                                st.download_button(
-                                                    label=f"📥 {file_name}",
-                                                    data=f.read(),
-                                                    file_name=file_name,
-                                                    mime=f"image/{output_format}",
-                                                    key=f"download_{idx}"
-                                                )
-                        
-                        elif download_format == 'ZIP file':
-                            zip_buffer = create_zip(extracted_files)
-                            st.download_button(
-                                label=f"📦 Download ZIP ({len(extracted_files)} images)",
-                                data=zip_buffer,
-                                file_name=f"{video_name}_frames.zip",
-                                mime="application/zip"
-                            )
-                        
-                        elif download_format == 'PDF document':
-                            if not tower_number or tower_number.strip() == "":
-                                st.error("❌ Please enter a Tower Number for PDF generation.")
-                            else:
-                                with st.spinner("Creating PDF..."):
-                                    pdf_buffer = create_pdf(extracted_files, tower_number.strip(), uploaded_file.name, paper_size, orientation)
-                                    pdf_filename = f"ROC photos for {tower_number.strip()}.pdf"
-                                    st.download_button(
-                                        label=f"📄 Download PDF ({len(extracted_files)} images) - {paper_size} {orientation}",
-                                        data=pdf_buffer,
-                                        file_name=pdf_filename,
-                                        mime="application/pdf"
-                                    )
-                    
-                    else:
-                        st.error("❌ Failed to extract frames. The video might be empty or processing failed.")
-
-                except Exception as e:
-                    st.error(f"An unexpected error occurred: {e}")
+                                st.error(f"Could not display preview: {e}")
                 
-                finally:
-                    # Cleanup code that runs regardless of success or failure
-                    if tmp_video_path and os.path.exists(tmp_video_path):
-                        os.unlink(tmp_video_path)
-                        st.info("🗑️ Temporary video file cleaned up")
-                    if temp_dir and os.path.exists(temp_dir):
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        st.info("🗑️ Temporary image directory cleaned up")
-                    if silent_video_path and os.path.exists(silent_video_path):
-                        os.unlink(silent_video_path)
-                        st.info("🗑️ Silent video file cleaned up")
+                if len(processed_data['extracted_files']) > 3:
+                    st.info(f"... and {len(processed_data['extracted_files']) - 3} more images")
+                
+                # --- Download Section ---
+                st.subheader("📥 Downloads")
+                
+                # Video download section (if audio removal was requested)
+                if st.session_state.silent_video_data:
+                    st.markdown("#### 📹 Video (No Audio)")
+                    silent_data = st.session_state.silent_video_data
+                    st.download_button(
+                        label=f"📹 Download {silent_data['filename']}",
+                        data=silent_data['data'],
+                        file_name=silent_data['filename'],
+                        mime="video/mp4",
+                        help="Video with audio removed",
+                        key="download_silent_video"
+                    )
+                
+                # Images download section
+                st.markdown("#### 🖼️ Extracted Images")
+
+                if download_format == 'Individual images':
+                    cols_per_row = 3
+                    for i in range(0, len(processed_data['extracted_files']), cols_per_row):
+                        cols = st.columns(cols_per_row)
+                        for j, col in enumerate(cols):
+                            idx = i + j
+                            if idx < len(processed_data['extracted_files']):
+                                with col:
+                                    file_info = processed_data['extracted_files'][idx]
+                                    st.download_button(
+                                        label=f"📥 {file_info['name']}",
+                                        data=file_info['data'],
+                                        file_name=file_info['name'],
+                                        mime=f"image/{processed_data['output_format']}",
+                                        key=f"download_img_{idx}"
+                                    )
+                
+                elif download_format == 'ZIP file':
+                    # Create ZIP from session state data
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        for file_info in processed_data['extracted_files']:
+                            zip_file.writestr(file_info['name'], file_info['data'])
+                    zip_buffer.seek(0)
+                    
+                    st.download_button(
+                        label=f"📦 Download ZIP ({len(processed_data['extracted_files'])} images)",
+                        data=zip_buffer,
+                        file_name=f"{processed_data['video_name']}_frames.zip",
+                        mime="application/zip",
+                        key="download_zip"
+                    )
+                
+                elif download_format == 'PDF document':
+                    if not tower_number or tower_number.strip() == "":
+                        st.error("❌ Please enter a Tower Number for PDF generation.")
+                    else:
+                        # Create temporary files for PDF generation
+                        with tempfile.TemporaryDirectory() as temp_pdf_dir:
+                            temp_image_paths = []
+                            for i, file_info in enumerate(processed_data['extracted_files']):
+                                temp_path = os.path.join(temp_pdf_dir, file_info['name'])
+                                with open(temp_path, 'wb') as f:
+                                    f.write(file_info['data'])
+                                temp_image_paths.append(temp_path)
+                            
+                            pdf_buffer = create_pdf(temp_image_paths, tower_number.strip(), processed_data['original_filename'], paper_size, orientation)
+                            pdf_filename = f"ROC photos for {tower_number.strip()}.pdf"
+                            st.download_button(
+                                label=f"📄 Download PDF ({len(processed_data['extracted_files'])} images) - {paper_size} {orientation}",
+                                data=pdf_buffer,
+                                file_name=pdf_filename,
+                                mime="application/pdf",
+                                key="download_pdf"
+                            )
 
 
 # Password protection and main app
