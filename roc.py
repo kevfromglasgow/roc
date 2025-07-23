@@ -48,13 +48,25 @@ def check_password():
         # Password correct
         return True
 
+def reset_session_state():
+    """Reset all processing-related session state variables"""
+    keys_to_reset = [
+        'processed_data', 
+        'silent_video_data', 
+        'processing_complete', 
+        'last_uploaded_file'
+    ]
+    for key in keys_to_reset:
+        if key in st.session_state:
+            del st.session_state[key]
+
 def remove_audio_from_video(input_path, original_filename):
     """Remove audio from video using ffmpeg"""
     
-    # Create output filename with "_no_audio" suffix
+    # Create output filename with "_processed" suffix
     video_stem = Path(original_filename).stem
     video_ext = Path(original_filename).suffix
-    output_filename = f"{video_stem}_no_audio{video_ext}"
+    output_filename = f"{video_stem}_processed{video_ext}"
     
     # Create temporary file for output
     temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=video_ext)
@@ -290,6 +302,14 @@ def main():
     if 'processing_complete' not in st.session_state:
         st.session_state.processing_complete = False
     
+    # Add reset button in the sidebar or at the top
+    if st.session_state.processing_complete:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🔄 Reset")
+        if st.sidebar.button("🔄 Reset Application", type="secondary", help="Clear all data and start over"):
+            reset_session_state()
+            st.rerun()
+    
     uploaded_file = st.file_uploader(
         "Upload a video file",
         type=['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'm4v'],
@@ -312,11 +332,11 @@ def main():
         st.subheader("🔇 Audio Options")
         remove_audio_option = st.checkbox(
             "Remove audio from video",
-            help="Create a silent version of the video alongside frame extraction"
+            help="Create a processed version of the video without audio alongside frame extraction"
         )
         
         if remove_audio_option:
-            st.info("📹 A video file without audio will be available for download after processing")
+            st.info("📹 A processed video file without audio will be available for download after processing")
         
         st.subheader("🖼️ Frame Extraction Settings")
         col1, col2 = st.columns(2)
@@ -473,7 +493,7 @@ def main():
                             st.info("🗑️ Temporary image directory cleaned up")
                         if silent_video_path and os.path.exists(silent_video_path):
                             os.unlink(silent_video_path)
-                            st.info("🗑️ Silent video file cleaned up")
+                            st.info("🗑️ Processed video file cleaned up")
 
             # Display results from session state
             if st.session_state.processed_data:
@@ -502,15 +522,15 @@ def main():
                 
                 # Video download section (if audio removal was requested)
                 if st.session_state.silent_video_data:
-                    st.markdown("#### 📹 Video (No Audio)")
+                    st.markdown("#### 📹 Video (Processed)")
                     silent_data = st.session_state.silent_video_data
                     st.download_button(
                         label=f"📹 Download {silent_data['filename']}",
                         data=silent_data['data'],
                         file_name=silent_data['filename'],
                         mime="video/mp4",
-                        help="Video with audio removed",
-                        key="download_silent_video"
+                        help="Processed video with audio removed",
+                        key="download_processed_video"
                     )
                 
                 # Images download section
@@ -571,6 +591,14 @@ def main():
                                 mime="application/pdf",
                                 key="download_pdf"
                             )
+                
+                # Reset button in main area after downloads
+                st.markdown("---")
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    if st.button("🔄 Reset and Process New Video", type="secondary", help="Clear all data and start over with a new video"):
+                        reset_session_state()
+                        st.rerun()
 
 
 # Password protection and main app
